@@ -1,0 +1,192 @@
+/* groovylint-disable NestedBlockDepth */
+
+pipeline {
+    agent any
+
+    tools {
+        'org.jenkinsci.plugins.docker.commons.tools.DockerTool' 'docker'
+    }
+
+    parameters {
+        string(
+            name: 'Docker_image_name',
+            defaultValue: 'al3xs0n/*',
+            description: 'Имя образа после сборки (без версии)'
+        )
+
+        string(
+            name: 'registry_url',
+            defaultValue: 'https://registry.hub.docker.com/',
+            description: 'credentialId от registry который будет использоваться для отправки образа'
+        )
+
+        string(
+            name: 'registry_creds',
+            defaultValue: 'registry_credentials',
+            description: 'credentialId от registry который будет использоваться для отправки образа'
+        )
+
+        string(
+            name: 'repo_url',
+            defaultValue: 'https://github.com/*/*',
+            description: 'Репозиторий с исходным кодом'
+        )
+
+        string(
+            name: 'repo_branch',
+            defaultValue: 'master',
+            description: 'Ветка в репозитории с которой нужно сделать сборку'
+        )
+
+        string(
+            name: 'Dockerfile_path',
+            defaultValue: '.',
+            description: 'Путь до Dockerfile от корня репозитория'
+        )
+
+        string(
+            name: 'postman_tests_url',
+            defaultValue: 'url на тесты постмана',
+            description: 'Ссылка на тест для newman\'а'
+        )
+
+        string(
+            name: 'git_creds',
+            defaultValue: 'git_credentials',
+            description: 'credentialId от github который будет использоваться для git clone'
+        )
+    }
+
+    stages {
+        stage('Init') {
+            steps {
+                echo 'Starting with params:'
+
+                script {
+                    params.each() { param, value ->
+                        print "${param}: ${value}"
+                    }
+                }
+            }
+        }
+
+        stage('Clonning repository') {
+            steps {
+                print "Cloning repository using ${params.git_creds} credential"
+
+                git url: "${params.repo_url}",
+                    branch: "${params.repo_branch}",
+                    credentialsId: "${params.git_creds}"
+            }
+        }
+
+        stage('Pytest') {
+            steps {
+                dir("./${params.Dockerfile_path}/..") {
+                    withPythonEnv('python3') {
+                        sh 'pip install -r requirements.txt'
+                        sh 'pip install pytest coverage pytest-cov'
+                        sh 'pytest --cov=src --junitxml=coverage/test-results.xml test'
+                        sh 'pytest --cov=src --cov-report=lcov:coverage/lcov.info tests'
+                    }
+                }
+            }
+        }
+
+        stage('SonarQube') {
+            environment {
+                scannerHome = tool 'Sonar'
+            }
+            steps {
+                script {
+                    withSonarQubeEnv('Sonar') {
+                        sh "${scannerHome}/bin/sonar-scanner \
+                            -Dsonar.projectKey=jenkins_checks \
+                            -Dsonar.projectName=jenkins_checks \
+                            -Dsonar.projectVersion=1.0 \
+                            -Dsonar.sources=./${params.Dockerfile_path} \
+                            -Dsonar.tests=./${params.Dockerfile_path}/../tests \
+                            -Dsonar.language=py \
+                            -Dsonar.python.coverage.reportPaths=./${params.Dockerfile_path}/../coverage/test-results.xml"
+                    }
+                }
+            }
+        }
+
+        stage("Quality Gate") {
+            steps {
+                timeout(time: 1, unit: 'MINUTES') {
+                waitForQualityGate abortPipeline: true
+                }
+            }
+        }
+
+        stage('Docker build') {
+            steps {
+                dir("./${params.Dockerfile_path}") {
+                    script {
+                        print "Trying to build image ${params.Docker_image_name}:${env.BUILD_ID}"
+                        docker.withTool('docker') {
+                            myImage = docker.build("${params.Docker_image_name}:${env.BUILD_ID}")
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Test image') {
+            steps {
+                script {
+                    docker.withTool('docker') {
+                        sh "docker network create jenkins-pipeline-network-${env.BUILD_ID}"
+
+                        docker.image('redis:7.4.1').withRun("--name redis --network jenkins-pipeline-network-${env.BUILD_ID} -p 6379:6379") { c ->
+                            docker.image('redis:7.4.1').inside("--network jenkins-pipeline-network-${env.BUILD_ID}") {
+                                // wait till redis starts
+
+                                sh 'while ! redis-cli -h redis -p 6379 ping; do sleep 10; done'
+                            }
+                            myImage.withRun("-p 10080:8080 --name app --network jenkins-pipeline-network-${env.BUILD_ID}") { c1 ->
+                                docker.image('node:current').inside("-v /home/al3xs0n/docs/PPDRIS/hw_4/jenkins_data/reports:/tmp/reports --network jenkins-pipeline-network-${env.BUILD_ID}") {
+                                    sh 'npm install --save-dev newman'
+                                    sh 'npm install --save-dev newman-reporter-allure'
+
+                                    sh "npx newman run ${params.postman_tests_url} --reporters cli,allure --reporter-allure-export /tmp/reports/${env.BUILD_ID} --reporter-allure-resultsDir /tmp/reports/${env.BUILD_ID}"
+                                }
+
+                                sh "ls /var/jenkins_home/reports/${env.BUILD_ID}"
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Send data to allure') {
+            steps {
+                script() {
+                    sh "ls /var/jenkins_home/reports/${env.BUILD_ID}"
+                }
+                allure([
+                    includeProperties: false,
+                    jdk: '',
+                    properties: [],
+                    reportBuildPolicy: 'ALWAYS',
+                    results: [[path: "/var/jenkins_home/reports/${env.BUILD_ID}"]]
+                ])
+            }
+        }
+
+        stage('Pushing image') {
+            steps {
+                script {
+                    docker.withTool('docker') {
+                        docker.withRegistry("${params.registry_url}", "${params.registry_creds}") {
+                            myImage.push()
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
