@@ -3,8 +3,12 @@ from models import Session
 
 import redis
 
+__redis_server_connection = None
 
-__redis_server_connection = redis.Redis(host='redis', port=6379, db=0, decode_responses=True)
+try:
+    __redis_server_connection = redis.Redis(host='redis', port=6379, db=0, decode_responses=True)
+except:
+    __redis_server_connection = redis.Redis(host='0.0.0.0', port=6379, db=0, decode_responses=True)
 
 
 def create_session() -> Session:
