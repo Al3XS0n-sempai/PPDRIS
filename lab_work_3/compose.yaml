@@ -1,0 +1,11 @@
+services:
+  web:
+    image: al3xs0n/simple_server_with_db:0.0.2
+    container_name: my_simple_server_with_db
+    ports:
+      - "8080:8080"
+    restart: "no"
+  redis:
+    image: redis:7.4.1
+    ports:
+      - "6379:6379"
