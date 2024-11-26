@@ -1,0 +1,27 @@
+---
+- hosts: ansible_node
+  become: yes
+  tasks:
+    - name: Gather facts # использовалось при дебаге
+      setup:
+    - name: Установить Python и необходимые зависимости
+      apt:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - python3
+        - python3-pip
+        - python3-venv
+        - unzip # Не работает pip install ьез него
+
+    - name: Установка зависимостей
+      pip:
+        name:
+          - fastapi
+          - uvicorn
+        virtualenv: /venv/
+        virtualenv_command: python3 -m venv
+    - name: Запуск приложения
+      command: /app/run.sh
+      async: 10
+      poll: 0
